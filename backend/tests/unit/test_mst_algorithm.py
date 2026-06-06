@@ -77,10 +77,18 @@ def test_calculate_simple_triangle() -> None:
 
 
 def test_calculate_mandatory_force_included() -> None:
-    """REQ-MST-001 mandatory: edge X-Y (cost 100) is force-included even
-    though cheaper alternatives exist."""
+    """REQ-MST-001 mandatory: edge X-Y (cost 100) is force-included in the
+    spanning tree even though cheaper alternatives exist.
+
+    The result is a spanning tree of n-1 edges: the mandatory edge is fixed
+    in place, then Kruskal picks the cheapest non-mandatory edge that
+    connects the remaining components. The total cost is HIGHER than the
+    unconstrained optimal (3.0 in this case) because the mandatory edge
+    locks in a suboptimal connection.
+    """
     # Triangle: cheapest is 1-2 (1.0), then 2-3 (2.0), then 1-3 (100.0 mandatory).
-    # The mandatory 1-3 must appear; total cost = 1+2+100 = 103.
+    # The mandatory 1-3 is fixed; the cheapest other edge that connects the
+    # rest is 1-2 (1.0). Result: {1-3 mandatory, 1-2}, total = 101.0.
     nodes: List[NodeDict] = [_node(1), _node(2), _node(3)]
     edges: List[EdgeDict] = [
         _edge(1, 1, 2, 1.0),
@@ -92,8 +100,11 @@ def test_calculate_mandatory_force_included() -> None:
 
     edge_ids = {e.id for e in result.edges}
     assert edges[2].id in edge_ids, "mandatory edge must be in MST"
-    assert result.total_cost == pytest.approx(103.0)
-    assert len(result.edges) == 3  # 3 nodes, 3 edges (mandatory forces triangle)
+    # Unconstrained optimal is 1+2=3.0; the result with mandatory is 1+100=101.0.
+    assert result.total_cost == pytest.approx(101.0)
+    assert result.total_cost > 3.0, "mandatory should make total cost higher than unconstrained optimal"
+    # n-1 = 2 edges for a spanning tree of 3 nodes.
+    assert len(result.edges) == 2
 
 
 def test_calculate_mandatory_cycle_rejected() -> None:
@@ -178,3 +189,32 @@ def test_calculate_disconnected_returns_unreachable() -> None:
     assert len(unreachable) == 2
     assert {uuid.UUID(int=1), uuid.UUID(int=2)}.issubset(set(unreachable)) or \
            {uuid.UUID(int=3), uuid.UUID(int=4)}.issubset(set(unreachable))
+
+
+def test_calculate_disconnected_no_partial_result() -> None:
+    """REQ-MST-006 (core layer): when DisconnectedGraphError is raised,
+    NO MSTResult is constructed. The core must never return partial data
+    on failure — the service layer relies on this to know whether to
+    persist to mst_results.
+
+    This is the triangulation test that closes the loop on the
+    "no write on failure" requirement at the unit level.
+    """
+    nodes: List[NodeDict] = [_node(1), _node(2), _node(3), _node(4)]
+    edges: List[EdgeDict] = [
+        _edge(1, 1, 2, 1.0),
+        _edge(2, 3, 4, 1.0),
+    ]
+
+    # Use a sentinel: if MSTResult were ever returned, the test would
+    # still raise the caught exception and the sentinel would be
+    # observed. We assert the exception is the only observable outcome.
+    sentinel = "MSTResult was unexpectedly returned"
+    try:
+        result = calculate(nodes, edges)
+        # If we get here, MSTResult WAS returned — fail the test.
+        pytest.fail(f"{sentinel}: {result!r}")
+    except DisconnectedGraphError as exc:
+        # The exception path. The MSTResult must NOT be assigned.
+        assert exc.unreachable_nodes is not None
+        assert len(exc.unreachable_nodes) == 2
