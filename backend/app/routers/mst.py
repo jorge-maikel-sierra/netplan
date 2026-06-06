@@ -82,7 +82,7 @@ async def calculate_mst(
     user: dict = Depends(get_current_user),
     supabase=Depends(get_supabase_client),
 ):
-    """Run MST for a project. Rate-limited (5/min per organization_id)."""
+    """Run MST for a project. Rate-limited (5/min per user via sub claim)."""
     org_id_str = user["org_id"]
     try:
         org_id = UUID(org_id_str)

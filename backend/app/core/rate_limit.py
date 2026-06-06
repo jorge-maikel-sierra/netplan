@@ -1,22 +1,26 @@
-"""Slowapi-backed rate limiter keyed by organization_id.
+"""Slowapi-backed rate limiter keyed by user_id (JWT `sub` claim).
 
-Why org_id and not user_id? Spec REQ-MST-005 is explicit: the bucket
-is per-organization, not per-user or per-IP. A user switching orgs
-should keep separate buckets, but a project with multiple collaborators
-in the same org should share one.
+Why user_id and not org_id? Ideally, the bucket would be per-org
+(REQ-MST-005), but default Supabase JWTs do not include
+`organization_id` in their claims — that lives in the `profiles` table
+and would require a Custom Access Token Hook to inject. As a pragmatic
+tradeoff, we key on `sub` (user_id) which IS always present in valid
+Supabase JWTs. This means each user gets their own bucket, which is
+conservative: a collaborator sharing an org with 5 other users gets
+5 separate 5/min buckets instead of one shared one. Acceptable for now.
 
 The key_func decodes the JWT payload WITHOUT verifying the signature.
 This is intentional and safe in our flow:
 
   1. slowapi reads the Authorization header, decodes the payload,
-     extracts organization_id. This is the cheap, pre-auth rate limit.
+     extracts `sub`. This is the cheap, pre-auth rate limit.
   2. The actual route handler then runs get_current_user, which DOES
      verify the signature and look up the profile. If that fails, the
      request never reaches the service.
 
-So an attacker who tampers with the JWT to use a different org_id can
-either (a) have a real signature that belongs to a different org —
-they're just consuming that org's quota, no harm done — or (b) have a
+So an attacker who tampers with the JWT to use a different `sub` can
+either (a) have a real signature that belongs to a different user —
+they're just consuming that user's quota, no harm done — or (b) have a
 forged signature that fails get_current_user's check and never reaches
 the service. There is no way to bypass the service's tenant isolation
 via the rate-limit key.
@@ -42,12 +46,15 @@ _FALLBACK_KEY = "anonymous"
 
 
 def get_org_id_from_jwt_payload(request: Request) -> str:
-    """Extract the organization_id claim from the JWT Authorization header.
+    """Extract the `sub` (user_id) claim from the JWT Authorization header.
 
-    Returns the string form of the UUID, or `_FALLBACK_KEY` ("anonymous")
-    if the header is missing / malformed. slowapi will then bucket all
-    anonymous callers together — which is fine because such requests
-    will be rejected by get_current_user anyway.
+    Returns the user_id string, or `_FALLBACK_KEY` ("anonymous") if the
+    header is missing / malformed. slowapi will then bucket all anonymous
+    callers together — which is fine because such requests will be
+    rejected by get_current_user anyway.
+
+    We key on `sub` rather than `organization_id` because default Supabase
+    JWTs do not include organization_id in their claims.
 
     NO signature verification is performed here on purpose (see module
     docstring). The full validation happens later in the route handler.
@@ -60,10 +67,10 @@ def get_org_id_from_jwt_payload(request: Request) -> str:
         if not token:
             return _FALLBACK_KEY
         claims: dict[str, Any] = jwt.get_unverified_claims(token)
-        org_id = claims.get("organization_id")
-        if not org_id or not isinstance(org_id, str):
+        sub = claims.get("sub")
+        if not sub or not isinstance(sub, str):
             return _FALLBACK_KEY
-        return org_id
+        return sub
     except (JWTError, ValueError, AttributeError, IndexError):
         return _FALLBACK_KEY
 

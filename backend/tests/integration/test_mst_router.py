@@ -291,8 +291,12 @@ async def test_calculate_endpoint_tenant_isolation(
 
 
 async def test_calculate_endpoint_unauthenticated_returns_401(test_app) -> None:
-    """REQ-MST-003: no Authorization header -> 401."""
-    # Override get_current_user to a dependency that raises 401.
+    """REQ-MST-003: no Authorization header -> 401.
+
+    Overrides get_current_user with a save/restore pattern so the test
+    is self-documenting and robust even if the conftest cleanup path
+    changes in the future.
+    """
     from fastapi import HTTPException, status as http_status
 
     def _fake_dep():
@@ -301,17 +305,23 @@ async def test_calculate_endpoint_unauthenticated_returns_401(test_app) -> None:
             detail={"error": "INVALID_TOKEN", "code": 401, "detail": "Invalid token"},
         )
 
+    original = test_app.dependency_overrides.get(get_current_user)
     test_app.dependency_overrides[get_current_user] = _fake_dep
+    try:
+        transport = ASGITransport(app=test_app)
+        project_id = "33333333-3333-3333-3333-333333333333"
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            response = await ac.post(
+                f"/api/v1/projects/{project_id}/mst/calculate"
+            )
 
-    transport = ASGITransport(app=test_app)
-    project_id = "33333333-3333-3333-3333-333333333333"
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        response = await ac.post(
-            f"/api/v1/projects/{project_id}/mst/calculate"
-        )
-
-    assert response.status_code == 401
-    assert response.json()["error"] == "INVALID_TOKEN"
+        assert response.status_code == 401
+        assert response.json()["error"] == "INVALID_TOKEN"
+    finally:
+        if original is None:
+            del test_app.dependency_overrides[get_current_user]
+        else:
+            test_app.dependency_overrides[get_current_user] = original
 
 
 # ---------------------------------------------------------------------------
@@ -421,6 +431,49 @@ async def test_calculate_endpoint_disconnected_returns_422(
     assert len(body["unreachable_nodes"]) == 2
 
 
+async def test_calculate_endpoint_disconnected_single_node_detail(
+    test_app, sample_uuids: dict[str, uuid.UUID]
+) -> None:
+    """REQ-MST-002: 1 unreachable node -> singular Spanish detail (n=1)."""
+    project_id = sample_uuids["project_id"]
+    a, b, c, d = (
+        sample_uuids["node_a"],
+        sample_uuids["node_b"],
+        sample_uuids["node_c"],
+        sample_uuids["node_d"],
+    )
+    # A-B-C connected, D isolated -> 1 unreachable node.
+    nodes = [
+        {"id": str(a), "name": "A", "type": "city", "lat": 0.0, "lng": 0.0},
+        {"id": str(b), "name": "B", "type": "city", "lat": 0.0, "lng": 0.0},
+        {"id": str(c), "name": "C", "type": "city", "lat": 0.0, "lng": 0.0},
+        {"id": str(d), "name": "D", "type": "city", "lat": 0.0, "lng": 0.0},
+    ]
+    edges = [
+        {"id": str(sample_uuids["edge_ab"]), "node_a_id": str(a), "node_b_id": str(b),
+         "cost": 1.0, "constraint_type": "normal"},
+        {"id": str(sample_uuids["edge_bc"]), "node_a_id": str(b), "node_b_id": str(c),
+         "cost": 1.0, "constraint_type": "normal"},
+    ]
+    mock_supabase = build_supabase_mock(nodes=nodes, edges=edges)
+    install_supabase_override(test_app, mock_supabase)
+
+    transport = ASGITransport(app=test_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        response = await ac.post(
+            f"/api/v1/projects/{project_id}/mst/calculate"
+        )
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"] == "DISCONNECTED_GRAPH"
+    assert body["detail"] == (
+        "El grafo tiene un nodo no alcanzable desde el resto."
+    )
+    assert len(body["unreachable_nodes"]) == 1
+    assert body["unreachable_nodes"][0] == str(sample_uuids["node_d"])
+
+
 # ---------------------------------------------------------------------------
 # REQ-MST-006: no persistence on failure
 # ---------------------------------------------------------------------------
@@ -450,6 +503,53 @@ async def test_calculate_endpoint_no_persist_on_failure(
     assert not any(call[0] == "insert" for call in mst_chain.calls), (
         "mst_results.insert must NOT be called on a 422 response"
     )
+
+
+# ---------------------------------------------------------------------------
+# REQ-MST-005: rate limiting
+# ---------------------------------------------------------------------------
+
+
+async def test_calculate_endpoint_rate_limited(
+    test_app, sample_uuids: dict[str, uuid.UUID]
+) -> None:
+    """REQ-MST-005: after 5 successful POSTs, the 6th returns 429.
+
+    The rate limiter is reset at the start of each test via the
+    ``test_app`` fixture, so the bucket starts empty. 5 requests exhaust
+    the 5/min allowance; the 6th hits the limit.
+    """
+    project_id = sample_uuids["project_id"]
+    nodes, edges = make_triangle_data(sample_uuids)
+    mock_supabase = build_supabase_mock(nodes=nodes, edges=edges)
+    install_supabase_override(test_app, mock_supabase)
+
+    transport = ASGITransport(app=test_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        for i in range(5):
+            response = await ac.post(
+                f"/api/v1/projects/{project_id}/mst/calculate"
+            )
+            assert response.status_code == 200, (
+                f"Request {i + 1} should be 200, got {response.status_code}: "
+                f"{response.text}"
+            )
+
+        # 6th request — rate-limited.
+        limited = await ac.post(
+            f"/api/v1/projects/{project_id}/mst/calculate"
+        )
+
+    assert limited.status_code == 429, (
+        f"Expected 429, got {limited.status_code}: {limited.text}"
+    )
+    body = limited.json()
+    assert body["error"] == "RATE_LIMITED"
+    assert body["code"] == 429
+    assert isinstance(body["retry_after"], int)
+    assert body["retry_after"] >= 1
+    # The Spanish detail must mention the retry_after value.
+    assert str(body["retry_after"]) in body["detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -539,3 +639,101 @@ async def test_latest_endpoint_cross_tenant_returns_404(
 
     assert response.status_code == 404
     assert response.json()["error"] == "NOT_FOUND"
+
+
+# ---------------------------------------------------------------------------
+# REQ-MST-004: latest enrichment — edge-skipping & source_node_name
+# ---------------------------------------------------------------------------
+
+
+async def test_latest_enrichment_skips_deleted_edges(
+    test_app, sample_uuids: dict[str, uuid.UUID]
+) -> None:
+    """A deleted edge referenced by mst_results is absent from the
+    response's ``mst_edges`` list.
+
+    The service loads current edges with ``.in_("id", edge_ids)``; a
+    deleted edge won't appear in the result and must be silently skipped.
+    """
+    project_id = sample_uuids["project_id"]
+    a, b = sample_uuids["node_a"], sample_uuids["node_b"]
+    nodes = [
+        {"id": str(a), "name": "A", "type": "city", "lat": 0.0, "lng": 0.0},
+        {"id": str(b), "name": "B", "type": "city", "lat": 0.0, "lng": 0.0},
+    ]
+    # Only edge_ab exists; edge_bc is NOT in edges (simulating deletion).
+    edges = [
+        {"id": str(sample_uuids["edge_ab"]), "node_a_id": str(a),
+         "node_b_id": str(b), "cost": 5.0, "constraint_type": "normal"},
+    ]
+    mst_results = [{
+        "id": "abcdef00-0000-0000-0000-000000000001",
+        "project_id": str(project_id),
+        "algorithm": "kruskal",
+        "total_cost": "5.0",
+        "edge_ids": [
+            str(sample_uuids["edge_ab"]),  # exists
+            str(sample_uuids["edge_bc"]),  # deleted — must be skipped
+        ],
+        "parameters": {},
+        "calculated_at": "2026-06-06T00:00:00+00:00",
+    }]
+    mock_supabase = build_supabase_mock(
+        nodes=nodes, edges=edges, mst_results=mst_results
+    )
+    install_supabase_override(test_app, mock_supabase)
+
+    transport = ASGITransport(app=test_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        response = await ac.get(
+            f"/api/v1/projects/{project_id}/mst/latest"
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    # Only the existing edge should be in the response.
+    assert len(body["mst_edges"]) == 1
+    assert body["mst_edges"][0]["edge_id"] == str(sample_uuids["edge_ab"])
+
+
+async def test_latest_enrichment_source_node_name(
+    test_app, sample_uuids: dict[str, uuid.UUID]
+) -> None:
+    """The ``source_node_name`` field in each edge matches the node name
+    from the nodes table, resolved via the edge's node_a_id."""
+    project_id = sample_uuids["project_id"]
+    a, b = sample_uuids["node_a"], sample_uuids["node_b"]
+    nodes = [
+        {"id": str(a), "name": "Buenos Aires", "type": "city",
+         "lat": 0.0, "lng": 0.0},
+        {"id": str(b), "name": "Montevideo", "type": "city",
+         "lat": 0.0, "lng": 0.0},
+    ]
+    edges = [
+        {"id": str(sample_uuids["edge_ab"]), "node_a_id": str(a),
+         "node_b_id": str(b), "cost": 5.0, "constraint_type": "normal"},
+    ]
+    mst_results = [{
+        "id": "abcdef00-0000-0000-0000-000000000001",
+        "project_id": str(project_id),
+        "algorithm": "kruskal",
+        "total_cost": "5.0",
+        "edge_ids": [str(sample_uuids["edge_ab"])],
+        "parameters": {},
+        "calculated_at": "2026-06-06T00:00:00+00:00",
+    }]
+    mock_supabase = build_supabase_mock(
+        nodes=nodes, edges=edges, mst_results=mst_results
+    )
+    install_supabase_override(test_app, mock_supabase)
+
+    transport = ASGITransport(app=test_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        response = await ac.get(
+            f"/api/v1/projects/{project_id}/mst/latest"
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert len(body["mst_edges"]) == 1
+    assert body["mst_edges"][0]["source_node_name"] == "Buenos Aires"
