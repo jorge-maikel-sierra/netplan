@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import uuid
 from typing import Any, Dict
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
@@ -107,9 +107,55 @@ def test_app(mock_supabase_client: MagicMock) -> FastAPI:
         "org_id": str(SAMPLE_UUIDS["org_id"]),
     }
     real_app.dependency_overrides[get_supabase_client] = lambda: mock_supabase_client
+
+    # Patch get_supabase_client at the module level in routers that call it
+    # directly (not via Depends). The MST router uses Depends, but projects,
+    # nodes, and edges routers call get_supabase_client() as a plain function.
+    from app.routers import projects as _projects_rtr
+    from app.routers import nodes as _nodes_rtr
+    from app.routers import edges as _edges_rtr
+    _router_patches = [
+        patch.object(_projects_rtr, "get_supabase_client", return_value=mock_supabase_client),
+        patch.object(_nodes_rtr, "get_supabase_client", return_value=mock_supabase_client),
+        patch.object(_edges_rtr, "get_supabase_client", return_value=mock_supabase_client),
+    ]
+    for _p in _router_patches:
+        _p.start()
+
     yield real_app
-    # Cleanup so other tests start fresh.
+
+    # Cleanup patches and DI overrides.
+    for _p in _router_patches:
+        _p.stop()
     real_app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def sample_project(sample_uuids) -> dict:
+    """A sample project dict keyed from sample_uuids."""
+    return {
+        "id": str(sample_uuids["project_id"]),
+        "organization_id": str(sample_uuids["org_id"]),
+        "created_by": str(sample_uuids["user_id"]),
+        "name": "Test Project",
+        "description": "A project for testing",
+        "created_at": "2026-06-06T00:00:00+00:00",
+        "updated_at": "2026-06-06T00:00:00+00:00",
+    }
+
+
+@pytest.fixture
+def sample_node(sample_uuids) -> dict:
+    """A sample node dict keyed from sample_uuids."""
+    return {
+        "id": str(sample_uuids["node_a"]),
+        "project_id": str(sample_uuids["project_id"]),
+        "name": "Node A",
+        "type": "city",
+        "lat": 0.0,
+        "lng": 0.0,
+        "created_at": "2026-06-06T00:00:00+00:00",
+    }
 
 
 @pytest.fixture
