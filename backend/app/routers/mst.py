@@ -80,9 +80,9 @@ async def calculate_mst(
     request: Request,  # required by slowapi's decorator
     project_id: UUID,
     user: dict = Depends(get_current_user),
+    supabase=Depends(get_supabase_client),
 ):
     """Run MST for a project. Rate-limited (5/min per organization_id)."""
-    supabase = get_supabase_client()
     org_id_str = user["org_id"]
     try:
         org_id = UUID(org_id_str)
@@ -151,9 +151,9 @@ async def calculate_mst(
 async def get_latest_mst(
     project_id: UUID,
     user: dict = Depends(get_current_user),
+    supabase=Depends(get_supabase_client),
 ):
     """Return the most recent MST result for a project."""
-    supabase = get_supabase_client()
     org_id_str = user["org_id"]
     try:
         org_id = UUID(org_id_str)

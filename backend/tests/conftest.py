@@ -91,6 +91,17 @@ def test_app(mock_supabase_client: MagicMock) -> FastAPI:
     """
     from app.main import app as real_app  # local import to avoid heavy side effects
 
+    # Reset the slowapi rate limiter so each test starts with an empty
+    # bucket. The limiter is a module-level singleton on
+    # app.core.rate_limit, so without this reset, the second test in
+    # a session would already see the 5/min bucket partially full.
+    from app.core.rate_limit import limiter
+    if hasattr(limiter, "_storage") and limiter._storage is not None:
+        try:
+            limiter._storage.reset()
+        except Exception:
+            pass
+
     real_app.dependency_overrides[get_current_user] = lambda: {
         "user_id": str(SAMPLE_UUIDS["user_id"]),
         "org_id": str(SAMPLE_UUIDS["org_id"]),

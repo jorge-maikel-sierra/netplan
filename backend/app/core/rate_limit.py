@@ -76,9 +76,15 @@ def get_org_id_from_jwt_payload(request: Request) -> str:
 # The key_func is set globally on the Limiter so all `@limiter.limit(...)`
 # decorations pick it up automatically. Per-endpoint overrides are still
 # possible by passing `key_func=` to `.limit(...)`.
+#
+# headers_enabled=False: slowapi's _inject_headers requires the endpoint
+# to return a starlette.responses.Response so it can append X-RateLimit-*
+# headers. Our endpoint returns a Pydantic model that FastAPI serializes
+# later, so we can't safely mutate the response from the decorator. The
+# Retry-After header is still set by our custom 429 handler.
 limiter = Limiter(
     key_func=get_org_id_from_jwt_payload,
-    headers_enabled=True,  # adds X-RateLimit-* headers on responses
+    headers_enabled=False,
 )
 
 
@@ -88,22 +94,20 @@ limiter = Limiter(
 
 
 def rate_limit_exceeded_handler(
-    request: Request, exc: RateLimitExceeded
+    request: Request, exc: RateLimitExceeded, response: Any = None
 ) -> JSONResponse:
     """Convert a slowapi RateLimitExceeded into the project's error format.
 
-    The default slowapi handler returns a non-conforming shape; we wrap
-    it so the frontend can treat it like every other error.
+    The handler is registered with FastAPI's `add_exception_handler`, so
+    FastAPI calls it with (request, exc). Some slowapi versions also
+    pass a `response` keyword argument, so we accept it for
+    compatibility.
 
     retry_after is the number of seconds the client should wait before
-    retrying. We parse it from the exc.limit attribute when available.
+    retrying. We parse it from the exc attribute when available.
     """
-    # slowapi exposes the limit string on exc.detail; the actual seconds
-    # is best-effort extracted from it.
     retry_after = 60  # safe default
     try:
-        # exc.detail is a string like "5 per 1 minute" — fall back to
-        # 60s if we can't parse. The Retry-After header is also set.
         retry_after = int(getattr(exc, "retry_after", 60) or 60)
     except (TypeError, ValueError):
         retry_after = 60
@@ -114,6 +118,6 @@ def rate_limit_exceeded_handler(
         "detail": f"Demasiadas solicitudes. Reintentá en {retry_after} segundos.",
         "retry_after": retry_after,
     }
-    response = JSONResponse(status_code=429, content=body)
-    response.headers["Retry-After"] = str(retry_after)
-    return response
+    json_response = JSONResponse(status_code=429, content=body)
+    json_response.headers["Retry-After"] = str(retry_after)
+    return json_response
