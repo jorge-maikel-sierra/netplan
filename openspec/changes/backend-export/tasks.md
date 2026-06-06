@@ -33,16 +33,16 @@ Chain strategy: stacked-to-main
 - [x] 2.1 Add `build_export_workbook()` to `backend/app/services/excel_service.py` — styled 3-sheet workbook (Project Info, Nodes, Edges & MST), `BytesIO` return
 - [x] 2.2 Create `backend/app/services/pdf_service.py` — `build_pdf_report()` with reportlab: header, nodes table, edges table, MST summary, embedded map image (optional), `BytesIO` return
 
-## Phase 3: Router & Wiring (PR 2)
+## Phase 3: Router & Wiring (PR 2) ✅
 
-- [ ] 3.1 Create `backend/app/routers/export.py` — `GET /projects/{id}/export/excel` (StreamingResponse .xlsx) + `POST /projects/{id}/export/pdf` (StreamingResponse .pdf with `PDFExportRequest` body); auth via `get_current_user`, tenant-scoped project fetch, consistent error format
-- [ ] 3.2 Register `export.router` in `backend/app/main.py` with prefix `/api/v1`
+- [x] 3.1 Create `backend/app/routers/export.py` — `GET /projects/{id}/export/excel` (StreamingResponse .xlsx) + `POST /projects/{id}/export/pdf` (StreamingResponse .pdf with `PDFExportRequest` body); auth via `get_current_user`, tenant-scoped project fetch, consistent error format
+- [x] 3.2 Register `export.router` in `backend/app/main.py` with prefix `/api/v1`
 
 ## Phase 4: Testing ✅
 
 - [x] 4.1 Create `backend/tests/unit/test_excel_service.py` — unit tests: workbook structure, cell values per sheet, header styling, 0 nodes case
 - [x] 4.2 Create `backend/tests/unit/test_pdf_service.py` — unit tests: PDF generation with/without map image, empty image string, file size > minimum
-- [ ] 4.3 Create `backend/tests/routers/test_export.py` — integration tests: full Excel/PDF flows (200), unauthenticated (401), cross-tenant (404), project not found (404), empty project valid export
+- [x] 4.3 Create `backend/tests/routers/test_export.py` — integration tests: full Excel/PDF flows (200), unauthenticated (401), cross-tenant (404), project not found (404), empty project valid export
 
 ## Verification Criteria
 

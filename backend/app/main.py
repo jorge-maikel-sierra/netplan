@@ -5,7 +5,7 @@ from slowapi.errors import RateLimitExceeded
 
 from app.config import settings
 from app.core.rate_limit import limiter, rate_limit_exceeded_handler
-from app.routers import projects, nodes, edges, mst
+from app.routers import export, projects, nodes, edges, mst
 
 app = FastAPI(title="NetPlan API", version="1.0.0")
 app.add_middleware(
@@ -53,6 +53,7 @@ app.include_router(projects.router, prefix="/api/v1")
 app.include_router(nodes.router, prefix="/api/v1")
 app.include_router(edges.router, prefix="/api/v1")
 app.include_router(mst.router, prefix="/api/v1")
+app.include_router(export.router, prefix="/api/v1")
 
 
 @app.get("/healthz")

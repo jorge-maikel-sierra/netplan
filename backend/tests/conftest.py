@@ -110,14 +110,16 @@ def test_app(mock_supabase_client: MagicMock) -> FastAPI:
 
     # Patch get_supabase_client at the module level in routers that call it
     # directly (not via Depends). The MST router uses Depends, but projects,
-    # nodes, and edges routers call get_supabase_client() as a plain function.
+    # nodes, edges, and export routers call get_supabase_client() as a plain function.
     from app.routers import projects as _projects_rtr
     from app.routers import nodes as _nodes_rtr
     from app.routers import edges as _edges_rtr
+    from app.routers import export as _export_rtr
     _router_patches = [
         patch.object(_projects_rtr, "get_supabase_client", return_value=mock_supabase_client),
         patch.object(_nodes_rtr, "get_supabase_client", return_value=mock_supabase_client),
         patch.object(_edges_rtr, "get_supabase_client", return_value=mock_supabase_client),
+        patch.object(_export_rtr, "get_supabase_client", return_value=mock_supabase_client),
     ]
     for _p in _router_patches:
         _p.start()
