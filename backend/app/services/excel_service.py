@@ -1,6 +1,8 @@
-"""Excel parsing service for node imports."""
+"""Excel parsing and export service for node imports and project exports."""
 import openpyxl
-from typing import List, Tuple, Dict, Any
+from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.utils import get_column_letter
+from typing import List, Tuple, Dict, Any, Optional
 from io import BytesIO
 
 
@@ -135,3 +137,138 @@ def parse_nodes_xlsx(file_bytes: bytes) -> Tuple[List[Dict[str, Any]], List[Dict
             })
     
     return valid_rows, errors
+
+
+# ---------------------------------------------------------------------------
+# Export workbook
+# ---------------------------------------------------------------------------
+
+HEADER_FONT = Font(bold=True, color="FFFFFF", size=11)
+HEADER_FILL = PatternFill(start_color="2F5496", end_color="2F5496", fill_type="solid")
+HEADER_ALIGNMENT = Alignment(horizontal="center", vertical="center")
+
+
+def _style_header(ws: openpyxl.worksheet.worksheet.Worksheet) -> None:
+    """Apply bold white-on-blue styling to the header row and freeze it."""
+    for cell in ws[1]:
+        cell.font = HEADER_FONT
+        cell.fill = HEADER_FILL
+        cell.alignment = HEADER_ALIGNMENT
+    ws.freeze_panes = "A2"
+
+
+def _auto_width(ws: openpyxl.worksheet.worksheet.Worksheet) -> None:
+    """Set column widths based on max content length (capped at 50)."""
+    for col_cells in ws.columns:
+        max_len = 0
+        col_letter = get_column_letter(col_cells[0].column)
+        for cell in col_cells:
+            val = str(cell.value) if cell.value is not None else ""
+            max_len = max(max_len, len(val))
+        ws.column_dimensions[col_letter].width = min(max_len + 3, 50)
+
+
+def _build_edge_id_set(mst_result: Optional[dict]) -> set[str]:
+    """Extract the set of edge IDs present in the MST result."""
+    if mst_result is None:
+        return set()
+    raw = mst_result.get("edge_ids") or mst_result.get("mst_edges")
+    if isinstance(raw, list):
+        return {str(eid) for eid in raw}
+    return set()
+
+
+def build_export_workbook(
+    project: dict,
+    nodes: list[dict],
+    edges: list[dict],
+    mst_result: Optional[dict],
+) -> BytesIO:
+    """Build a styled 3-sheet .xlsx workbook for project export.
+
+    Sheets:
+      - Project Info: name, description, node/edge counts, MST total cost
+      - Nodes: label, type, latitude, longitude (sorted by label)
+      - Edges & MST: node_a, node_b, cost, constraint, in-MST flag
+
+    Returns:
+        BytesIO containing the .xlsx data (ready for StreamingResponse).
+    """
+    wb = openpyxl.Workbook()
+
+    # -------------------------------------------------------------------
+    # Sheet 1: Project Info
+    # -------------------------------------------------------------------
+    ws_info = wb.active
+    ws_info.title = "Project Info"
+    info_fields = [
+        ("Project Name", project.get("name", "")),
+        ("Description", project.get("description", "")),
+        ("Nodes", str(len(nodes))),
+        ("Edges", str(len(edges))),
+    ]
+    if mst_result:
+        total_cost = mst_result.get("total_cost", 0)
+        info_fields.append(("Total Cost", str(total_cost)))
+
+    for i, (key, val) in enumerate(info_fields, start=1):
+        ws_info.cell(row=i, column=1, value=f"{key}:")
+        ws_info.cell(row=i, column=2, value=val)
+
+    _style_header(ws_info)
+    _auto_width(ws_info)
+
+    # -------------------------------------------------------------------
+    # Sheet 2: Nodes
+    # -------------------------------------------------------------------
+    ws_nodes = wb.create_sheet("Nodes")
+    node_headers = ["Label", "Type", "Latitude", "Longitude"]
+    ws_nodes.append(node_headers)
+
+    sorted_nodes = sorted(nodes, key=lambda n: str(n.get("name", "")))
+    for n in sorted_nodes:
+        ws_nodes.append([
+            n.get("name", ""),
+            n.get("type", ""),
+            n.get("lat", ""),
+            n.get("lng", ""),
+        ])
+
+    _style_header(ws_nodes)
+    _auto_width(ws_nodes)
+
+    # -------------------------------------------------------------------
+    # Sheet 3: Edges & MST
+    # -------------------------------------------------------------------
+    ws_edges = wb.create_sheet("Edges & MST")
+    edge_headers = ["Node A", "Node B", "Cost", "Constraint", "In MST"]
+    ws_edges.append(edge_headers)
+
+    mst_edge_ids = _build_edge_id_set(mst_result)
+    # Build a lookup: node_id -> node name
+    node_name_by_id: dict[str, str] = {
+        str(n.get("id", "")): str(n.get("name", "")) for n in nodes
+    }
+
+    sorted_edges = sorted(edges, key=lambda e: float(e.get("cost", 0)), reverse=True)
+    for e in sorted_edges:
+        node_a_id = str(e.get("node_a_id", ""))
+        node_b_id = str(e.get("node_b_id", ""))
+        edge_id = str(e.get("id", ""))
+        in_mst = "Yes" if edge_id in mst_edge_ids else "No"
+        ws_edges.append([
+            node_name_by_id.get(node_a_id, node_a_id[:8]),
+            node_name_by_id.get(node_b_id, node_b_id[:8]),
+            e.get("cost", ""),
+            e.get("constraint_type", "normal"),
+            in_mst,
+        ])
+
+    _style_header(ws_edges)
+    _auto_width(ws_edges)
+
+    # Return as BytesIO
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
