@@ -2,7 +2,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.config import settings
-from app.routers import projects
+from app.routers import projects, nodes, edges
 
 app = FastAPI(title="NetPlan API", version="1.0.0")
 app.add_middleware(
@@ -40,6 +40,8 @@ async def generic_exception_handler(request: Request, exc: Exception):
 
 
 app.include_router(projects.router, prefix="/api/v1")
+app.include_router(nodes.router, prefix="/api/v1")
+app.include_router(edges.router, prefix="/api/v1")
 
 
 @app.get("/healthz")
