@@ -17,13 +17,15 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from slowapi import Limiter
 
 from app.core.mst_algorithm import (
     DisconnectedGraphError,
     InsufficientNodesError,
     MandatoryCycleError,
 )
+from app.core.rate_limit import limiter
 from app.dependencies import get_current_user
 from app.db.supabase_client import get_supabase_client
 from app.schemas.mst import MSTCalculateResponse, MSTLatestResponse
@@ -73,7 +75,9 @@ def _enrich_disconnected_detail(
     response_model=MSTCalculateResponse,
     status_code=status.HTTP_200_OK,
 )
+@limiter.limit("5/minute")
 async def calculate_mst(
+    request: Request,  # required by slowapi's decorator
     project_id: UUID,
     user: dict = Depends(get_current_user),
 ):

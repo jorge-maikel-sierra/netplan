@@ -1,8 +1,11 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from slowapi.errors import RateLimitExceeded
+
 from app.config import settings
-from app.routers import projects, nodes, edges
+from app.core.rate_limit import limiter, rate_limit_exceeded_handler
+from app.routers import projects, nodes, edges, mst
 
 app = FastAPI(title="NetPlan API", version="1.0.0")
 app.add_middleware(
@@ -39,9 +42,17 @@ async def generic_exception_handler(request: Request, exc: Exception):
     )
 
 
+# slowapi wiring: store the limiter on app.state so the @limiter.limit
+# decorators can find it, and register the custom 429 handler so the
+# response uses the project's error format.
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+
+
 app.include_router(projects.router, prefix="/api/v1")
 app.include_router(nodes.router, prefix="/api/v1")
 app.include_router(edges.router, prefix="/api/v1")
+app.include_router(mst.router, prefix="/api/v1")
 
 
 @app.get("/healthz")
