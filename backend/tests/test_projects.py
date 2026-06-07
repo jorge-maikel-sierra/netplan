@@ -222,6 +222,313 @@ async def test_free_tier_limit(
     assert response.json()["error"] == "FREE_TIER_LIMIT"
 
 
+# --- T-03: Name validation (min 3 chars) ---
+
+async def test_create_project_name_too_short(
+    client: AsyncClient,
+    mock_supabase_client: MagicMock,
+) -> None:
+    """POST /api/v1/projects with name < 3 chars returns 422."""
+    # Mock org plan lookup (free)
+    mock_supabase_client.table.return_value \
+        .select.return_value \
+        .eq.return_value \
+        .single.return_value \
+        .execute.return_value.data = {"plan": "free"}
+    # Mock project count check
+    mock_supabase_client.table.return_value \
+        .select.return_value \
+        .eq.return_value \
+        .execute.return_value.count = 1
+
+    # Name "ab" is only 2 chars
+    response = await client.post(
+        "/api/v1/projects",
+        json={"name": "ab", "description": "Testing"},
+    )
+
+    assert response.status_code == 422
+    # FastAPI validation error format
+    detail = response.json()["detail"]
+    assert isinstance(detail, list)
+    assert any("al menos 3 caracteres" in str(e.get("msg", "")) for e in detail)
+
+
+async def test_create_project_name_whitespace_only(
+    client: AsyncClient,
+    mock_supabase_client: MagicMock,
+) -> None:
+    """POST /api/v1/projects with whitespace-only name < 3 chars returns 422."""
+    # Mock org plan lookup (free)
+    mock_supabase_client.table.return_value \
+        .select.return_value \
+        .eq.return_value \
+        .single.return_value \
+        .execute.return_value.data = {"plan": "free"}
+    # Mock project count check
+    mock_supabase_client.table.return_value \
+        .select.return_value \
+        .eq.return_value \
+        .execute.return_value.count = 1
+
+    response = await client.post(
+        "/api/v1/projects",
+        json={"name": "  a  ", "description": "Testing"},
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert isinstance(detail, list)
+    assert any("al menos 3 caracteres" in str(e.get("msg", "")) for e in detail)
+
+
+async def test_update_project_name_too_short(
+    client: AsyncClient,
+    mock_supabase_client: MagicMock,
+    sample_project: dict[str, Any],
+) -> None:
+    """PATCH /api/v1/projects/{id} with name < 3 chars returns 422."""
+    project_id = sample_project["id"]
+    # Org exists
+    mock_supabase_client.table.return_value \
+        .select.return_value \
+        .eq.return_value \
+        .single.return_value \
+        .execute.return_value.data = {"id": "org-id"}
+    # Ownership check
+    mock_supabase_client.table.return_value \
+        .select.return_value \
+        .eq.return_value \
+        .eq.return_value \
+        .single.return_value \
+        .execute.return_value.data = {"id": project_id}
+
+    response = await client.patch(
+        f"/api/v1/projects/{project_id}",
+        json={"name": "xy"},
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert isinstance(detail, list)
+    assert any("al menos 3 caracteres" in str(e.get("msg", "")) for e in detail)
+
+
+# --- T-04: PATCH null handling ---
+
+async def test_update_project_null_values_ignored(
+    client: AsyncClient,
+    mock_supabase_client: MagicMock,
+    sample_project: dict[str, Any],
+) -> None:
+    """PATCH /api/v1/projects/{id} with null name/description ignores them (200)."""
+    project_id = sample_project["id"]
+    # Ownership check
+    mock_supabase_client.table.return_value \
+        .select.return_value \
+        .eq.return_value \
+        .eq.return_value \
+        .single.return_value \
+        .execute.return_value.data = {"id": project_id}
+    # Update returns the project
+    mock_supabase_client.table.return_value \
+        .update.return_value \
+        .eq.return_value \
+        .eq.return_value \
+        .execute.return_value.data = [sample_project]
+
+    # Send null for name and description - they should be ignored
+    response = await client.patch(
+        f"/api/v1/projects/{project_id}",
+        json={"name": None, "description": None},
+    )
+
+    # Should fail with 422 because no valid fields provided
+    assert response.status_code == 422
+    assert response.json()["error"] == "NO_FIELDS_TO_UPDATE"
+
+
+async def test_update_project_partial_null(
+    client: AsyncClient,
+    mock_supabase_client: MagicMock,
+    sample_project: dict[str, Any],
+) -> None:
+    """PATCH /api/v1/projects/{id} with null description but valid name updates name (200)."""
+    project_id = sample_project["id"]
+    updated_project = {**sample_project, "name": "New Name"}
+    # Ownership check
+    mock_supabase_client.table.return_value \
+        .select.return_value \
+        .eq.return_value \
+        .eq.return_value \
+        .single.return_value \
+        .execute.return_value.data = {"id": project_id}
+    # Update returns updated project
+    mock_supabase_client.table.return_value \
+        .update.return_value \
+        .eq.return_value \
+        .eq.return_value \
+        .execute.return_value.data = [updated_project]
+
+    # Send null for description, valid name - should update name only
+    response = await client.patch(
+        f"/api/v1/projects/{project_id}",
+        json={"name": "New Name", "description": None},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["name"] == "New Name"
+
+
+# --- T-05: Missing org and cross-tenant ---
+
+async def test_get_project_org_not_found(
+    client: AsyncClient,
+    mock_supabase_client: MagicMock,
+    sample_project: dict[str, Any],
+) -> None:
+    """GET /api/v1/projects/{id} when org not found returns 404 ORG_NOT_FOUND."""
+    project_id = sample_project["id"]
+    # Org lookup returns None
+    mock_supabase_client.table.return_value \
+        .select.return_value \
+        .eq.return_value \
+        .single.return_value \
+        .execute.return_value.data = None
+
+    response = await client.get(f"/api/v1/projects/{project_id}")
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "ORG_NOT_FOUND"
+
+
+async def test_update_project_org_not_found(
+    client: AsyncClient,
+    mock_supabase_client: MagicMock,
+    sample_project: dict[str, Any],
+) -> None:
+    """PATCH /api/v1/projects/{id} when org not found returns 404 ORG_NOT_FOUND."""
+    project_id = sample_project["id"]
+    # Org lookup returns None
+    mock_supabase_client.table.return_value \
+        .select.return_value \
+        .eq.return_value \
+        .single.return_value \
+        .execute.return_value.data = None
+
+    response = await client.patch(
+        f"/api/v1/projects/{project_id}",
+        json={"name": "Updated Name"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "ORG_NOT_FOUND"
+
+
+async def test_delete_project_org_not_found(
+    client: AsyncClient,
+    mock_supabase_client: MagicMock,
+    sample_project: dict[str, Any],
+) -> None:
+    """DELETE /api/v1/projects/{id} when org not found returns 404 ORG_NOT_FOUND."""
+    project_id = sample_project["id"]
+    # Org lookup returns None
+    mock_supabase_client.table.return_value \
+        .select.return_value \
+        .eq.return_value \
+        .single.return_value \
+        .execute.return_value.data = None
+
+    response = await client.delete(f"/api/v1/projects/{project_id}")
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "ORG_NOT_FOUND"
+
+
+async def test_get_project_cross_tenant(
+    client: AsyncClient,
+    mock_supabase_client: MagicMock,
+    sample_project: dict[str, Any],
+) -> None:
+    """GET /api/v1/projects/{id} from another tenant returns 404 PROJECT_NOT_FOUND."""
+    project_id = sample_project["id"]
+    # Org exists
+    mock_supabase_client.table.return_value \
+        .select.return_value \
+        .eq.return_value \
+        .single.return_value \
+        .execute.return_value.data = {"id": "org-id"}
+    # Project lookup returns None (cross-tenant or not found)
+    mock_supabase_client.table.return_value \
+        .select.return_value \
+        .eq.return_value \
+        .eq.return_value \
+        .single.return_value \
+        .execute.return_value.data = None
+
+    response = await client.get(f"/api/v1/projects/{project_id}")
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "PROJECT_NOT_FOUND"
+
+
+async def test_update_project_cross_tenant(
+    client: AsyncClient,
+    mock_supabase_client: MagicMock,
+    sample_project: dict[str, Any],
+) -> None:
+    """PATCH /api/v1/projects/{id} from another tenant returns 404 PROJECT_NOT_FOUND."""
+    project_id = sample_project["id"]
+    # Org exists
+    mock_supabase_client.table.return_value \
+        .select.return_value \
+        .eq.return_value \
+        .single.return_value \
+        .execute.return_value.data = {"id": "org-id"}
+    # Project ownership check returns None (cross-tenant)
+    mock_supabase_client.table.return_value \
+        .select.return_value \
+        .eq.return_value \
+        .eq.return_value \
+        .single.return_value \
+        .execute.return_value.data = None
+
+    response = await client.patch(
+        f"/api/v1/projects/{project_id}",
+        json={"name": "Updated Name"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "PROJECT_NOT_FOUND"
+
+
+async def test_delete_project_cross_tenant(
+    client: AsyncClient,
+    mock_supabase_client: MagicMock,
+    sample_project: dict[str, Any],
+) -> None:
+    """DELETE /api/v1/projects/{id} from another tenant returns 404 PROJECT_NOT_FOUND."""
+    project_id = sample_project["id"]
+    # Org exists
+    mock_supabase_client.table.return_value \
+        .select.return_value \
+        .eq.return_value \
+        .single.return_value \
+        .execute.return_value.data = {"id": "org-id"}
+    # Project ownership check returns None (cross-tenant)
+    mock_supabase_client.table.return_value \
+        .select.return_value \
+        .eq.return_value \
+        .eq.return_value \
+        .single.return_value \
+        .execute.return_value.data = None
+
+    response = await client.delete(f"/api/v1/projects/{project_id}")
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "PROJECT_NOT_FOUND"
+
+
 async def test_list_projects_401(test_app) -> None:
     """GET /api/v1/projects without auth token returns 401."""
     from fastapi import HTTPException, status as http_status

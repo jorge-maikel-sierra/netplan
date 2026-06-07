@@ -5,6 +5,8 @@ from typing import List
 from app.schemas.project import ProjectCreate, ProjectUpdate, ProjectResponse, ProjectDetailResponse
 from app.dependencies import get_current_user
 from app.db.supabase_client import get_supabase_client
+from app.services.mst_service import get_latest_mst, NoMSTResult
+from uuid import UUID
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -103,9 +105,22 @@ async def get_project(
     """
     Get project detail with nodes, edges, and last MST result.
     Returns 404 if project doesn't exist or belongs to another tenant.
+    Returns 404 if organization not found.
     """
     supabase = get_supabase_client()
     org_id = user["org_id"]
+
+    # Verify organization exists
+    org_response = (
+        supabase.table("organizations")
+        .select("id")
+        .eq("id", org_id)
+        .single()
+        .execute()
+    )
+
+    if org_response.data is None:
+        raise _error_response("ORG_NOT_FOUND", 404, "Organization not found")
 
     # Fetch project (tenant-scoped)
     project_response = (
@@ -140,16 +155,15 @@ async def get_project(
     )
     edges = edges_response.data or []
 
-    # Fetch latest MST result
-    mst_response = (
-        supabase.table("mst_results")
-        .select("*")
-        .eq("project_id", str(project_id))
-        .order("calculated_at", desc=True)
-        .limit(1)
-        .execute()
-    )
-    last_result = mst_response.data[0] if mst_response.data else None
+    # Fetch latest MST result using service (properly formatted)
+    try:
+        org_uuid = UUID(org_id)
+        project_uuid = UUID(str(project_id))
+        last_result = await get_latest_mst(supabase, project_uuid, org_uuid)
+        # Convert to dict for response_model validation
+        last_result = last_result.model_dump()
+    except NoMSTResult:
+        last_result = None
 
     return {
         "id": project["id"],
@@ -170,9 +184,24 @@ async def update_project(
     """
     Update project name or description.
     Returns 404 if project doesn't exist or belongs to another tenant.
+    Returns 404 if organization not found.
+    Returns 422 if no valid fields provided (all null).
+    Null values in name/description are ignored (not updated).
     """
     supabase = get_supabase_client()
     org_id = user["org_id"]
+
+    # Verify organization exists
+    org_response = (
+        supabase.table("organizations")
+        .select("id")
+        .eq("id", org_id)
+        .single()
+        .execute()
+    )
+
+    if org_response.data is None:
+        raise _error_response("ORG_NOT_FOUND", 404, "Organization not found")
 
     # Check ownership first (tenant isolation)
     check_response = (
@@ -216,9 +245,22 @@ async def delete_project(
     """
     Delete a project and all its children (nodes, edges, mst_results cascade).
     Returns 404 if project doesn't exist or belongs to another tenant.
+    Returns 404 if organization not found.
     """
     supabase = get_supabase_client()
     org_id = user["org_id"]
+
+    # Verify organization exists
+    org_response = (
+        supabase.table("organizations")
+        .select("id")
+        .eq("id", org_id)
+        .single()
+        .execute()
+    )
+
+    if org_response.data is None:
+        raise _error_response("ORG_NOT_FOUND", 404, "Organization not found")
 
     # Check ownership first
     check_response = (
