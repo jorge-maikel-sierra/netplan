@@ -7,6 +7,8 @@ from io import BytesIO
 
 
 REQUIRED_COLUMNS = ["nombre", "latitud", "longitud"]
+EDGE_REQUIRED_COLUMNS = ["origen", "destino", "costo"]
+EDGE_VALID_TYPES = {"normal", "mandatory", "forbidden"}
 MAX_ROWS = 10_000
 VALID_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -136,6 +138,136 @@ def parse_nodes_xlsx(file_bytes: bytes) -> Tuple[List[Dict[str, Any]], List[Dict
                 "tipo": tipo
             })
     
+    return valid_rows, errors
+
+
+def parse_edges_xlsx(file_bytes: bytes) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Parse an .xlsx file containing edge data.
+
+    The function looks for a second sheet first; if not found or lacking required
+    columns, it falls back to the first sheet.  Required columns: origen, destino,
+    costo.  Optional column: tipo_restriccion (defaults to 'normal').
+
+    Args:
+        file_bytes: Raw bytes of the .xlsx file
+
+    Returns:
+        Tuple of (valid_rows, errors)
+        - valid_rows: List of dicts with keys: origen, destino, costo, tipo_restriccion
+        - errors: List of dicts with keys: row, field, message
+    """
+    valid_rows: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+
+    # Load workbook
+    try:
+        workbook = openpyxl.load_workbook(BytesIO(file_bytes), read_only=True)
+    except Exception as e:
+        errors.append({"row": 0, "field": "file", "message": f"Invalid .xlsx file: {e}"})
+        return valid_rows, errors
+
+    # Choose the sheet to parse edges from
+    sheet = None
+    if len(workbook.sheetnames) >= 2:
+        # Try the second sheet
+        candidate = workbook[workbook.sheetnames[1]]
+        headers = [cell.value for cell in next(candidate.iter_rows(min_row=1, max_row=1))]
+        if all(col in headers for col in EDGE_REQUIRED_COLUMNS):
+            sheet = candidate
+
+    if sheet is None:
+        # Fallback to the active (first) sheet
+        sheet = workbook.active
+        headers = [cell.value for cell in next(sheet.iter_rows(min_row=1, max_row=1))]
+
+    # Validate required columns
+    missing = [col for col in EDGE_REQUIRED_COLUMNS if col not in headers]
+    if missing:
+        errors.append({
+            "row": 0,
+            "field": "columns",
+            "message": f"Missing required edge columns: {', '.join(missing)}. "
+                       f"Required: {', '.join(EDGE_REQUIRED_COLUMNS)}",
+        })
+        return valid_rows, errors
+
+    # Map column names to indices
+    col_idx = {col: headers.index(col) for col in EDGE_REQUIRED_COLUMNS}
+    tipo_idx = headers.index("tipo_restriccion") if "tipo_restriccion" in headers else None
+
+    row_num = 1  # header row
+    for row in sheet.iter_rows(min_row=2, values_only=True):
+        row_num += 1
+
+        if row_num > MAX_ROWS + 1:
+            errors.append({
+                "row": row_num,
+                "field": "row_count",
+                "message": f"Maximum {MAX_ROWS} rows allowed. File has more rows.",
+            })
+            break
+
+        # Skip completely empty rows
+        if all(cell is None for cell in row):
+            continue
+
+        row_errors: List[Dict[str, Any]] = []
+
+        # ---- origen ----
+        origen = row[col_idx["origen"]]
+        if origen is None or not str(origen).strip():
+            row_errors.append({"row": row_num, "field": "origen", "message": "Origen is required"})
+        else:
+            origen = str(origen).strip()
+
+        # ---- destino ----
+        destino = row[col_idx["destino"]]
+        if destino is None or not str(destino).strip():
+            row_errors.append({"row": row_num, "field": "destino", "message": "Destino is required"})
+        else:
+            destino = str(destino).strip()
+
+        # ---- costo ----
+        costo = row[col_idx["costo"]]
+        if costo is None:
+            row_errors.append({"row": row_num, "field": "costo", "message": "Costo is required"})
+        else:
+            try:
+                costo_val = float(costo)
+                if costo_val < 0:
+                    row_errors.append({"row": row_num, "field": "costo", "message": "Costo must be non-negative"})
+                else:
+                    costo = costo_val
+            except (ValueError, TypeError):
+                row_errors.append({"row": row_num, "field": "costo", "message": "Costo must be a valid number"})
+
+        # ---- tipo_restriccion (optional) ----
+        tipo = "normal"
+        if tipo_idx is not None and tipo_idx < len(row):
+            tipo_val = row[tipo_idx]
+            if tipo_val and str(tipo_val).strip():
+                tipo_str = str(tipo_val).strip().lower()
+                if tipo_str in EDGE_VALID_TYPES:
+                    tipo = tipo_str
+                else:
+                    row_errors.append({
+                        "row": row_num,
+                        "field": "tipo_restriccion",
+                        "message": f"Tipo must be one of: {', '.join(sorted(EDGE_VALID_TYPES))}",
+                    })
+
+        if row_errors:
+            errors.extend(row_errors)
+        else:
+            valid_rows.append({
+                "row_num": row_num,
+                "origen": origen,
+                "destino": destino,
+                "costo": costo,
+                "tipo_restriccion": tipo,
+            })
+
     return valid_rows, errors
 
 

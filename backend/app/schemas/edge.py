@@ -1,5 +1,5 @@
 from pydantic import BaseModel, ConfigDict, Field
-from typing import Optional
+from typing import Optional, List
 from uuid import UUID
 from datetime import datetime
 
@@ -30,3 +30,9 @@ class EdgeResponse(EdgeBase):
     id: UUID
     project_id: UUID
     created_at: datetime
+
+
+class EdgeImportResult(BaseModel):
+    imported: int
+    skipped: int
+    errors: List[dict]
