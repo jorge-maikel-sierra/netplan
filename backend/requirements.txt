@@ -20,6 +20,7 @@ hyperframe==6.1.0
 idna==3.18
 iniconfig==2.3.0
 multidict==6.7.1
+networkx==3.6.1
 openpyxl==3.1.5
 packaging==26.2
 passlib==1.7.4
