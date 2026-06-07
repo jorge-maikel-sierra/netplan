@@ -1,23 +1,22 @@
-"""Pure Kruskal MST core.
+"""MST core with NetworkX for optional edges.
 
 This module is intentionally IO-free: it takes dataclasses in, returns
 a dataclass out, and raises typed exceptions on invalid inputs. This
 makes the algorithm unit-testable without mocks and lets the async
 service wrapper (app.services.mst_service) own all database IO.
 
-Algorithm overview (mandatory + forbidden aware Kruskal):
+Algorithm overview (mandatory + forbidden aware, NetworkX MST):
   1. Validate node count (>= 2).
   2. Build a Union-Find over all nodes.
   3. Detect cycles within the mandatory edges via Union-Find. If any
      mandatory edge would close a loop with only other mandatory edges,
      raise MandatoryCycleError.
   4. Seed the result with ALL mandatory edges (they are force-included).
-  5. Sort non-mandatory, non-forbidden edges by cost ascending.
-  6. Add them via classic Kruskal: only add edges that connect two
-     different components. This is a custom implementation because
-     NetworkX's MST does not respect mandatory edges. The result is
-     a minimum-cost spanning forest that includes all mandatory edges.
-  7. If after step 6 the graph is still disconnected, raise
+  5. Build a NetworkX graph from optional (non-forbidden) edges only.
+  6. Compute minimum spanning forest via nx.minimum_spanning_tree()
+     on the optional-edge graph. This handles the Kruskal logic
+     internally while NetworkX manages the Union-Find.
+  7. Merge mandatory + NetworkX MST edges. If disconnected, raise
      DisconnectedGraphError with the unreachable node IDs.
   8. Return MSTResult with the chosen edges and total cost.
 """
@@ -207,42 +206,53 @@ def calculate(
     chosen: list[EdgeDict] = list(mandatory)
     total = sum(e.cost for e in mandatory)
 
-    # 5. Add optional edges in cost-ascending order using Kruskal:
-    #    only add edges that connect two different components. This
-    #    naturally produces a spanning tree (n-1 edges) of the
-    #    component partition imposed by the mandatory edges, then
-    #    merged with the optional edges.
-    optional_sorted = sorted(optional, key=lambda e: e.cost)
-    for e in optional_sorted:
+    # 5. Build a NetworkX graph from optional (non-forbidden) edges only.
+    #    Each edge carries its EdgeDict as data so we can recover the ID
+    #    and constraint_type after MST computation.
+    opt_graph: nx.Graph = nx.Graph()
+    for n in nodes:
+        opt_graph.add_node(n.id)
+    for e in optional:
+        opt_graph.add_edge(
+            e.node_a_id,
+            e.node_b_id,
+            edge_data=e,
+            weight=e.cost,
+        )
+
+    # 6. Compute minimum spanning forest on the optional-edge graph,
+    #    then filter through the Union-Find (already seeded with
+    #    mandatory edges) to skip edges that connect nodes already
+    #    in the same component. This produces the same result as
+    #    classic Kruskal but delegates the sorting/MST logic to
+    #    NetworkX.
+    mst_forest: nx.Graph = nx.minimum_spanning_tree(opt_graph, algorithm="kruskal")
+    for u, v, data in mst_forest.edges(data=True):
+        e: EdgeDict = data["edge_data"]
         if uf.find(e.node_a_id) != uf.find(e.node_b_id):
             uf.union(e.node_a_id, e.node_b_id)
             chosen.append(e)
             total += e.cost
 
-    # 6. Validate connectivity: every node must be reachable from every
-    #    other. We use the FINAL Union-Find (which includes both
-    #    mandatory and chosen optional) and NetworkX connected_components
-    #    over the chosen subgraph for clarity.
-    if uf.component_roots() and len(uf.component_roots()) > 1:
-        # Build the chosen subgraph so the user can see WHICH nodes
-        # are unreachable from the main component.
-        chosen_subgraph: nx.Graph = nx.Graph()
-        for n in nodes:
-            chosen_subgraph.add_node(n.id)
-        for e in chosen:
-            chosen_subgraph.add_edge(e.node_a_id, e.node_b_id)
-        components: list[set[UUID]] = [
-            set(c) for c in nx.connected_components(chosen_subgraph)
-        ]
-        # Sort by size descending: the largest component is "main", the
-        # rest are unreachable.
+    # 7. Validate connectivity: every node must be reachable from every
+    #    other after merging mandatory + NetworkX MST edges. Build the
+    #    chosen subgraph for the connectivity check — the Union-Find
+    #    only reflects mandatory edges at this point, so we use
+    #    NetworkX connected_components over the final chosen edge set.
+    chosen_subgraph: nx.Graph = nx.Graph()
+    for n in nodes:
+        chosen_subgraph.add_node(n.id)
+    for e in chosen:
+        chosen_subgraph.add_edge(e.node_a_id, e.node_b_id)
+    components: list[set[UUID]] = [
+        set(c) for c in nx.connected_components(chosen_subgraph)
+    ]
+    if len(components) > 1:
         components.sort(key=len, reverse=True)
         unreachable = sorted(
             node_id for comp in components[1:] for node_id in comp
         )
         raise DisconnectedGraphError(unreachable_nodes=unreachable)
 
-    # 7. Return the result. The result may have more than n-1 edges
-    #    (when mandatory edges force a cycle), but it is always
-    #    connected and the minimum cost under the given constraints.
+    # 8. Return the result.
     return MSTResult(edges=chosen, total_cost=total, unreachable_nodes=None)
